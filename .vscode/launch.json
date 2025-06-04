@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "code_to_pdf.py",
             "console": "integratedTerminal",
-            "args": "testing/a1/solution/time_analysis.cpp"
+            "args": "code_to_pdf.py" //"testing/a1/solution/time_analysis.cpp"
         }
     ]
 }

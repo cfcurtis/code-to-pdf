@@ -5,7 +5,10 @@ import config
 if config.language == "c++":
     import clang.cindex
 
+    # Not great...
     clang.cindex.Config.set_library_file("/usr/lib64/llvm20/lib/libclang.so.20.1")
+elif config.language == "python":
+    import ast
 
 MAX_HEIGHT_IN = 8.5
 MAX_WIDTH_IN = 7
@@ -28,38 +31,56 @@ def unindent(snippet: list[str]) -> None:
                 snippet[i] = snippet[i][1:]
 
 
-def clang_find_function(node, func_bounds: list[int, int]) -> None:
+def clang_find_function(node) -> tuple[None, None]:
     """
     Recursively visit the nodes of the clang-parsed AST.
     """
+    bounds = None
     if (
         node.kind == clang.cindex.CursorKind.FUNCTION_DECL
         and node.spelling == config.function_name
         and node.is_definition()
     ):
-        func_bounds[0] = node.extent.start.offset
-        func_bounds[1] = node.extent.end.offset
+        # update the start/end bounds
+        bounds = (node.extent.start.offset,
+                  node.extent.end.offset)
     else:
         for child in node.get_children():
-            clang_find_function(child, func_bounds)
-            if all(func_bounds):
+            bounds = clang_find_function(child)
+            if bounds:
                 break
+    
+    return bounds
 
-
-def get_cpp_start_end(fname: str) -> list[int, int]:
+def get_cpp_func(content: str, fname: str) -> str:
     """
     Parse the given C++ file using clang to find the named function body.
     """
 
     index = clang.cindex.Index.create()
     # Get the "translation unit" resulting from parsing the file
+    # redundant read of the file, but that's what clang wants
     tu = index.parse(fname, args=["-std=c++17"])
-    func_bounds = [None, None]
 
     # then recursively visit and search for the function
-    clang_find_function(tu.cursor, func_bounds)
+    bounds = clang_find_function(tu.cursor)
 
-    return func_bounds
+    if bounds:
+        return content[bounds[0]:bounds[1]]
+    else:
+        return ""
+
+def get_python_func(content: str) -> str:
+    """
+    Parse the given Python code using ast to find the named function body.
+    """
+    tree = ast.parse(content)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == config.function_name:
+            return ast.get_source_segment(content, node)
+
+    # couldn't find it, return an empty string
+    return ""
 
 
 def find_snippet(fname: str) -> list[str]:
@@ -70,16 +91,17 @@ def find_snippet(fname: str) -> list[str]:
         content = f.read()
 
     if config.language == "c++":
-        # redundant read of the file, but that's what clang wants
-        start, end = get_cpp_start_end(fname)
+        snippet = get_cpp_func(content, fname)
+    elif config.language == "python":
+        snippet = get_python_func(content)
     else:
-        print("Sorry, only C++ supported at this time")
+        print("Sorry, only C++ and Python supported at this time")
         sys.exit(1)
 
-    if start is None or end is None:
-        print(f"Warning: code snippet not found in {fname}")
+    if not snippet:
+        print(f"Warning: function {config.function_name} not found in {fname}")
     else:
-        snippet = content[start:end].strip().splitlines()
+        snippet = snippet.strip().splitlines()
         unindent(snippet)
 
     return snippet
@@ -106,6 +128,7 @@ def write_tex(fname: str, code: list[str], fontsize: float) -> None:
     # Assumes the files are in folders named for each student
     student_name = Path(fname).parent.name
     # replace placeholders
+    text = text.replace("REPLACEWITHLANGUGE", config.language)
     text = text.replace("REPLACEWITHTITLE", config.title_prefix + ": " + student_name)
     text = text.replace("REPLACEWITHCODE", "\n".join(code))
     text = text.replace("FONTSIZE", f"{fontsize:.1f}")
