@@ -21,38 +21,43 @@ def unindent(snippet: list[str]) -> None:
     """
     Remove any consistent indentation from all lines
     """
-    all_indented = True
-    while all_indented:
-        for line in snippet:
-            all_indented = all_indented and len(line) > 0 and line[0] == " "
-
-        if all_indented:
-            for i in range(len(snippet)):
-                snippet[i] = snippet[i][1:]
+    while all(len(line) > 0 and line[0] == " " for line in snippet):
+        for i in range(len(snippet)):
+            snippet[i] = snippet[i][1:]
 
 
-def clang_find_function(node) -> tuple[None, None]:
+def clang_find_function(
+    node: any, func_name: str, helpers: set[str], processed: set[str]
+) -> tuple[None, None]:
     """
     Recursively visit the nodes of the clang-parsed AST.
     """
     bounds = None
     if (
         node.kind == clang.cindex.CursorKind.FUNCTION_DECL
-        and node.spelling == config.function_name
+        and node.spelling == func_name
         and node.is_definition()
     ):
         # update the start/end bounds
-        bounds = (node.extent.start.offset,
-                  node.extent.end.offset)
-    else:
+        bounds = (node.extent.start.offset, node.extent.end.offset)
+        processed.add(func_name)
         for child in node.get_children():
-            bounds = clang_find_function(child)
+            if child.kind == clang.cindex.CursorKind.COMPOUND_STMT:
+                # go through the function body now
+                for subchild in child.get_children():
+                    if subchild.kind == clang.cindex.CursorKind.CALL_EXPR:
+                        helpers.add(subchild.spelling)
+    else:
+        # keep looking
+        for child in node.get_children():
+            bounds = clang_find_function(child, func_name, helpers, processed)
             if bounds:
                 break
-    
+
     return bounds
 
-def get_cpp_func(content: str, fname: str) -> str:
+
+def get_cpp_func(content: str, fname: str, func_name: str) -> str:
     """
     Parse the given C++ file using clang to find the named function body.
     """
@@ -63,24 +68,61 @@ def get_cpp_func(content: str, fname: str) -> str:
     tu = index.parse(fname, args=["-std=c++17"])
 
     # then recursively visit and search for the function
-    bounds = clang_find_function(tu.cursor)
+    helpers = set()
+    processed = config.ignore_helpers
+    bounds = clang_find_function(tu.cursor, func_name, helpers, processed)
+
+    snippet = ""
 
     if bounds:
-        return content[bounds[0]:bounds[1]]
-    else:
-        return ""
+        snippet = content[bounds[0] : bounds[1]]
 
-def get_python_func(content: str) -> str:
+    # check for helper functions as well
+    while helpers:
+        helper = helpers.pop()
+        if helper not in processed:
+            bounds = clang_find_function(tu.cursor, helper, helpers, processed)
+            if bounds:
+                snippet += "\n\n" + content[bounds[0] : bounds[1]]
+            processed.add(helper)
+
+    return snippet
+
+
+def get_python_func(
+    content: str, func_name: str, helpers: set[str], processed: set[str]
+) -> str:
     """
     Parse the given Python code using ast to find the named function body.
     """
     tree = ast.parse(content)
+    snippet = ""
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == config.function_name:
-            return ast.get_source_segment(content, node)
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            # add the function body to the snippet
+            snippet += ast.get_source_segment(content, node).strip()
+            processed.add(node.name)
 
-    # couldn't find it, return an empty string
-    return ""
+            # check for helper functions and add to the set
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    # for some reason function calls can be either ast.Name or ast.Attr
+                    name = (
+                        child.func.id
+                        if isinstance(child.func, ast.Name)
+                        else child.func.attr
+                    )
+                    helpers.add(name)
+
+            while helpers:
+                helper = helpers.pop()
+                if helper not in processed:
+                    # recursively call self
+                    snippet += "\n" + get_python_func(
+                        content, helper, helpers, processed
+                    )
+
+    return snippet
 
 
 def find_snippet(fname: str) -> list[str]:
@@ -91,9 +133,11 @@ def find_snippet(fname: str) -> list[str]:
         content = f.read()
 
     if config.language == "c++":
-        snippet = get_cpp_func(content, fname)
+        snippet = get_cpp_func(content, fname, config.function_name)
     elif config.language == "python":
-        snippet = get_python_func(content)
+        helpers = set()
+        processed = config.ignore_helpers
+        snippet = get_python_func(content, config.function_name, helpers, processed)
     else:
         print("Sorry, only C++ and Python supported at this time")
         sys.exit(1)
@@ -126,7 +170,11 @@ def write_tex(fname: str, code: list[str], fontsize: float) -> None:
         text = f.read()
 
     # Assumes the files are in folders named for each student
-    student_name = Path(fname).parent.name
+    if not (student_name := Path(fname).parent.name):
+        student_name = Path(fname).name
+
+    student_name = student_name.replace("_", "")
+
     # replace placeholders
     text = text.replace("REPLACEWITHLANGUGE", config.language)
     text = text.replace("REPLACEWITHTITLE", config.title_prefix + ": " + student_name)
@@ -145,8 +193,7 @@ def main(files: list[str]) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     for fname in files:
-        code = find_snippet(fname)
-        if code:
+        if code := find_snippet(fname):
             fontsize = calc_fontsize(code)
             write_tex(fname, code, fontsize)
 
