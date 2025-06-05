@@ -6,7 +6,11 @@ if config.language == "c++":
     import clang.cindex
 
     # Not great...
-    clang.cindex.Config.set_library_file("/usr/lib64/llvm20/lib/libclang.so.20.1")
+    if sys.platform == "linux":
+        clang.cindex.Config.set_library_file("/usr/lib64/llvm20/lib/libclang.so.20.1")
+    elif sys.platform == "win32":
+        # install with chocolatey
+        clang.cindex.Config.set_library_file("C:/Program Files/LLVM/bin/libclang.dll")
 elif config.language == "python":
     import ast
 
@@ -25,9 +29,18 @@ def unindent(snippet: list[str]) -> None:
         for i in range(len(snippet)):
             snippet[i] = snippet[i][1:]
 
+def clang_find_helper_calls(node: object, helpers: set[str]):
+    """
+    Recursively visit the nodes and find all function calls.
+    """
+    for child in node.get_children():
+        if child.kind == clang.cindex.CursorKind.CALL_EXPR:
+            helpers.add(child.spelling)
+        clang_find_helper_calls(child, helpers)
+
 
 def clang_find_function(
-    node: any, func_name: str, helpers: set[str], processed: set[str]
+    node: object, func_name: str, helpers: set[str], processed: set[str]
 ) -> tuple[None, None]:
     """
     Recursively visit the nodes of the clang-parsed AST.
@@ -41,12 +54,7 @@ def clang_find_function(
         # update the start/end bounds
         bounds = (node.extent.start.offset, node.extent.end.offset)
         processed.add(func_name)
-        for child in node.get_children():
-            if child.kind == clang.cindex.CursorKind.COMPOUND_STMT:
-                # go through the function body now
-                for subchild in child.get_children():
-                    if subchild.kind == clang.cindex.CursorKind.CALL_EXPR:
-                        helpers.add(subchild.spelling)
+        clang_find_helper_calls(node, helpers)
     else:
         # keep looking
         for child in node.get_children():
@@ -70,11 +78,9 @@ def get_cpp_func(content: str, fname: str, func_name: str) -> str:
     # then recursively visit and search for the function
     helpers = set()
     processed = config.ignore_helpers
-    bounds = clang_find_function(tu.cursor, func_name, helpers, processed)
 
     snippet = ""
-
-    if bounds:
+    if bounds := clang_find_function(tu.cursor, func_name, helpers, processed):
         snippet = content[bounds[0] : bounds[1]]
 
     # check for helper functions as well
