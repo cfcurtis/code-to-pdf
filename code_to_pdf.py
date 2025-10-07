@@ -20,6 +20,10 @@ PT_PER_INCH = 72
 BOX_WIDTH_EM = 0.6  # listing package default
 LINE_SPACE_SCALE = 2  # double space
 
+# ansi escape sequences for fancy output formatting
+RED = '\033[91m'
+END = '\033[0m'
+
 
 def unindent(snippet: list[str]) -> None:
     """
@@ -28,6 +32,7 @@ def unindent(snippet: list[str]) -> None:
     while all(len(line) > 0 and line[0] == " " for line in snippet):
         for i in range(len(snippet)):
             snippet[i] = snippet[i][1:]
+
 
 def clang_find_helper_calls(node: object, helpers: set[str]):
     """
@@ -131,12 +136,50 @@ def get_python_func(
     return snippet
 
 
+def strip_unicode(src: str) -> str|None:
+    """
+    Checks for non-ascii unicode characters. Prints out a warning if found,
+    and returns a copy with offending chars replaced with spaces, or None.
+    """
+    non_ascii_c = []
+    for line in src.splitlines():
+        non_ascii_i = []
+        for i, c in enumerate(line):
+            if ord(c) > 255:
+                non_ascii_c.append(c)
+                non_ascii_i.append(i)
+        
+        if non_ascii_i:
+            for i in range(len(line)):
+                if i in non_ascii_i:
+                    print(RED + line[i] + END, end="")
+                else:
+                    print(line[i], end="")
+    
+    if non_ascii_c:
+        print(RED + "\nNon-ascii characters found!" + END)
+        for c in set(non_ascii_c):
+            src = src.replace(c, ' ')
+        return src
+    else:
+        return None
+
+
 def find_snippet(fname: str) -> list[str]:
     """
     Finds the code snippet defined by config.regex.
     """
-    with open(fname, "r") as f:
+    with open(fname, "r", encoding="utf-8") as f:
         content = f.read()
+    
+    if new_contents := strip_unicode(content):
+        # found some funky chars, write a new copy without them
+        print("Writing temp copy of", fname, "with Unicode chars removed")
+        fname = "temp.cpp"
+        content = new_contents
+        # Clang assumes unix-style line endings regardless of platform
+        with open(fname, "w", newline='\n') as f:
+            f.write(new_contents)
 
     if config.language == "c++":
         snippet = get_cpp_func(content, fname, config.function_name)
@@ -163,7 +206,7 @@ def calc_fontsize(code: list[str]) -> float:
     """
     h_min = MAX_HEIGHT_IN * PT_PER_INCH / (len(code) * LINE_SPACE_SCALE)
     longest_line = max([len(line) for line in code])
-    print(f"Longest line: {longest_line} characters")
+    # print(f"Longest line: {longest_line} characters")
     w_min = MAX_WIDTH_IN * PT_PER_INCH / (longest_line * BOX_WIDTH_EM)
     return min(h_min, w_min)
 
@@ -206,7 +249,7 @@ def main(files: list[str]) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python code_to_pdf.py <input_files>")
+        print("Edit config.py to configure options\nUsage: python code_to_pdf.py <input_files>")
         sys.exit(1)
 
     main(sys.argv[1:])
